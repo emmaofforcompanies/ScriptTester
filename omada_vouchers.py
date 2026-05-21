@@ -28,11 +28,11 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # From your Omada Cloud URL:
 #   omadacId=3ee66939ba6b266f59d8e2ef60be1870
-OMADAC_ID = os.getenv("OMADA_OMADAC_ID", "3ee66939ba6b266f59d8e2ef60be1870")
+OMADAC_ID = "3ee66939ba6b266f59d8e2ef60be1870"
 
 # From Settings > Platform Integration > Open API  (Client mode app)
-CLIENT_ID     = os.getenv("OMADA_CLIENT_ID",     "YOUR_CLIENT_ID_HERE")
-CLIENT_SECRET = os.getenv("OMADA_CLIENT_SECRET",  "YOUR_CLIENT_SECRET_HERE")
+CLIENT_ID     = "01620a1fb27e4e9a9d3d5dd7f18faaa9"
+CLIENT_SECRET = "70be9cbe1cf74aa3b99195166d8c5e18"
 
 # Connector URL from your Omada Cloud login URL
 # (the connectorUrl= param you shared)
