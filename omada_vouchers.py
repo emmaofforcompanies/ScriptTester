@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
 """
-Omada Controller OpenAPI - List In-Use Vouchers
-Auth: OAuth2 Client Credentials mode (local OpenAPI)
-
-Interface Access Address : https://192.168.1.25:443
-Omada ID                 : 3ee66939ba6b266f59d8e2ef60be1870
+Omada Cloud OpenAPI - List In-Use Vouchers
+Auth: OAuth2 Client Credentials (cloud northbound, EU West)
 
 Usage:
     pip install requests
     python omada_vouchers.py
 
-    Debug mode (prints raw API responses):
+    Debug mode:
     python omada_vouchers.py --debug
 """
 
@@ -24,20 +21,16 @@ from datetime import datetime
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ──────────────────────────────────────────────────────────────
-#  CONFIG  –  only CLIENT_ID and CLIENT_SECRET need filling in
+#  CONFIG  –  only CLIENT_SECRET needs filling in
 # ──────────────────────────────────────────────────────────────
 
-# From Settings > Platform Integration > Open API  (Client mode app)
-CLIENT_ID = "01620a1fb27e4e9a9d3d5dd7f18faaa9"
+CLIENT_ID     = "01620a1fb27e4e9a9d3d5dd7f18faaa9"
 CLIENT_SECRET = "70be9cbe1cf74aa3b99195166d8c5e18"
 
-# Pre-filled from your "View Open API Attributes" panel
-OMADAC_ID = "3ee66939ba6b266f59d8e2ef60be1870"
-BASE_URL  = "https://192.168.1.25:443"   # Interface Access Address
+OMADAC_ID     = "3ee66939ba6b266f59d8e2ef60be1870"
+NORTHBOUND    = "https://euw1-omada-northbound.tplinkcloud.com"
 
-# Leave blank to auto-select the first site
 SITE_ID   = os.getenv("OMADA_SITE_ID", "")
-
 PAGE_SIZE = 100
 DEBUG     = "--debug" in sys.argv
 # ──────────────────────────────────────────────────────────────
@@ -51,22 +44,25 @@ def dbg(label, data):
 
 def get_access_token(session):
     """
-    Local OpenAPI token endpoint.
-    Try both snake_case and camelCase field names.
+    Cloud northbound client_credentials token request.
+    Tries 4 payload combinations to handle variation across controller versions.
     """
-    url = f"{BASE_URL}/openapi/authorize/token?grant_type=client_credentials"
+    url = f"{NORTHBOUND}/openapi/authorize/token?grant_type=client_credentials"
 
     attempts = [
-        {"omadacId": OMADAC_ID, "client_id": CLIENT_ID, "client_secret": CLIENT_SECRET},
-        {"omadacId": OMADAC_ID, "clientId": CLIENT_ID,  "clientSecret": CLIENT_SECRET},
+        # Cloud style — no omadacId in body
+        {"client_id":  CLIENT_ID, "client_secret":  CLIENT_SECRET},
+        {"clientId":   CLIENT_ID, "clientSecret":   CLIENT_SECRET},
+        # With omadacId in body
+        {"omadacId": OMADAC_ID, "client_id":  CLIENT_ID, "client_secret":  CLIENT_SECRET},
+        {"omadacId": OMADAC_ID, "clientId":   CLIENT_ID, "clientSecret":   CLIENT_SECRET},
     ]
 
     last_error = ""
     for payload in attempts:
-        print(f"  Trying: {url}")
         dbg("token payload", payload)
         try:
-            resp = session.post(url, json=payload, verify=False, timeout=15)
+            resp = session.post(url, json=payload, verify=True, timeout=15)
             data = resp.json()
             dbg("token response", data)
             if data.get("errorCode", -1) == 0:
@@ -75,26 +71,26 @@ def get_access_token(session):
                 print(f"  ✓ Token obtained  (expires in {expires}s)")
                 return token
             last_error = data.get("msg", str(data))
-            print(f"    ✗ {last_error}")
+            print(f"  ✗ Attempt failed: {last_error}  (payload keys: {list(payload.keys())})")
         except Exception as e:
-            print(f"    ✗ Request error: {e}")
+            last_error = str(e)
+            print(f"  ✗ Request error: {e}")
 
     sys.exit(
-        f"\n✗ Could not obtain access token.\n"
+        f"\n✗ All token attempts failed.\n"
         f"  Last error : {last_error}\n\n"
-        f"  Check:\n"
-        f"  1. CLIENT_ID and CLIENT_SECRET are correct\n"
-        f"  2. The API app is set to 'Client' mode (not Authorization Code)\n"
-        f"  3. Your machine can reach {BASE_URL} (try opening it in a browser)\n"
-        f"  4. Run with --debug for full request/response details\n"
+        f"  Most likely cause: CLIENT_SECRET is wrong.\n"
+        f"  Delete the API app in Omada, create a new one (Client mode),\n"
+        f"  and copy the secret immediately when it appears.\n"
+        f"  Run with --debug to see full responses.\n"
     )
 
 
 def get_sites(session, token):
-    url     = f"{BASE_URL}/openapi/v1/{OMADAC_ID}/sites"
+    url     = f"{NORTHBOUND}/openapi/v1/{OMADAC_ID}/sites"
     headers = {"Authorization": f"AccessToken={token}"}
     params  = {"currentPage": 1, "currentPageSize": 50}
-    resp    = session.get(url, headers=headers, params=params, verify=False, timeout=15)
+    resp    = session.get(url, headers=headers, params=params, verify=True, timeout=15)
     data    = resp.json()
     dbg("sites response", data)
     if data.get("errorCode", -1) != 0:
@@ -122,34 +118,32 @@ def fetch_vouchers(session, token, site_id, status="Used"):
     page    = 1
     headers = {"Authorization": f"AccessToken={token}"}
 
-    # Probe both endpoint names
     endpoints = [
-        f"{BASE_URL}/openapi/v1/{OMADAC_ID}/sites/{site_id}/hotspot/vouchers",
-        f"{BASE_URL}/openapi/v1/{OMADAC_ID}/sites/{site_id}/hotspot/voucher-groups",
+        f"{NORTHBOUND}/openapi/v1/{OMADAC_ID}/sites/{site_id}/hotspot/vouchers",
+        f"{NORTHBOUND}/openapi/v1/{OMADAC_ID}/sites/{site_id}/hotspot/voucher-groups",
     ]
 
     working_url = None
     for ep in endpoints:
         params = {"currentPage": 1, "currentPageSize": 1, "status": status}
-        resp   = session.get(ep, headers=headers, params=params, verify=False, timeout=15)
+        resp   = session.get(ep, headers=headers, params=params, verify=True, timeout=15)
         data   = resp.json()
-        dbg(f"probe {ep}", data)
+        dbg(f"probe {ep.split('/')[-1]}", data)
         if data.get("errorCode", -1) == 0:
             working_url = ep
-            print(f"  Using endpoint : {ep}")
+            print(f"  Using endpoint : .../{ep.split('/hotspot/')[1]}")
             break
         print(f"  Skipping {ep.split('/')[-1]} : {data.get('msg', data.get('errorCode'))}")
 
     if not working_url:
         sys.exit(
-            "✗ Voucher endpoint not available.\n"
-            "  This may mean your controller version does not yet expose\n"
-            "  the voucher API via OpenAPI. Run with --debug for details."
+            "✗ Voucher endpoint not available on this controller version.\n"
+            "  Run with --debug for full error details."
         )
 
     while True:
         params = {"currentPage": page, "currentPageSize": PAGE_SIZE, "status": status}
-        resp   = session.get(working_url, headers=headers, params=params, verify=False, timeout=15)
+        resp   = session.get(working_url, headers=headers, params=params, verify=True, timeout=15)
         result = resp.json()
         dbg(f"page {page}", result)
         data   = result.get("result", {}).get("data", [])
@@ -161,8 +155,6 @@ def fetch_vouchers(session, token, site_id, status="Used"):
 
     return all_vouchers
 
-
-# ── Formatting ─────────────────────────────────────────────────
 
 def fmt_duration(seconds):
     if seconds is None:
@@ -213,14 +205,16 @@ def print_vouchers(vouchers):
 
 
 def main():
-    if "YOUR_CLIENT_ID_HERE" in CLIENT_ID:
-        sys.exit("✗  Set CLIENT_ID and CLIENT_SECRET in the CONFIG block (or env vars)")
+    if "YOUR_CLIENT_SECRET_HERE" in CLIENT_SECRET:
+        sys.exit("✗  Set CLIENT_SECRET in the CONFIG block (or env var OMADA_CLIENT_SECRET)")
 
     session = requests.Session()
     session.headers.update({"Content-Type": "application/json"})
 
-    print(f"\nBase URL  : {BASE_URL}")
-    print(f"Omada ID  : {OMADAC_ID}")
+    print(f"\nNorthbound : {NORTHBOUND}")
+    print(f"Client ID  : {CLIENT_ID}")
+    print(f"Omada ID   : {OMADAC_ID}")
+    print(f"\nRequesting access token …")
 
     token   = get_access_token(session)
     site_id = SITE_ID or pick_site(session, token)
