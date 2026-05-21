@@ -26,11 +26,11 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # ──────────────────────────────────────────────────────────────
 
 # From Settings > Platform Integration > Open API  (Client mode app)
-CLIENT_ID     = "01620a1fb27e4e9a9d3d5dd7f18faaa9"
-CLIENT_SECRET = "70be9cbe1cf74aa3b99195166d8c5e18"
+CLIENT_ID     = os.getenv("OMADA_CLIENT_ID",     "YOUR_CLIENT_ID_HERE")
+CLIENT_SECRET = os.getenv("OMADA_CLIENT_SECRET",  "YOUR_CLIENT_SECRET_HERE")
 
 # From your Omada Cloud browser URL  (omadacId= param)
-OMADAC_ID = "3ee66939ba6b266f59d8e2ef60be1870"
+OMADAC_ID = os.getenv("OMADA_OMADAC_ID", "3ee66939ba6b266f59d8e2ef60be1870")
 
 # EU West northbound (token + API calls go here for cloud)
 NORTHBOUND_URL = "https://euw1-omada-northbound.tplinkcloud.com"
@@ -54,21 +54,33 @@ def dbg(label, data):
 
 def get_access_token(session):
     """
-    Try both URL patterns and both payload key styles used by
-    different Omada cloud versions.
+    Try every combination of:
+      - northbound URL vs connector URL
+      - with vs without omadacId in payload
+      - snake_case vs camelCase field names
+    Cloud controllers often don't want omadacId in the token request at all.
     """
     attempts = [
-        # (url, payload)
+        # Cloud-style: NO omadacId in body (omadacId goes into API calls, not auth)
         (
             f"{NORTHBOUND_URL}/openapi/authorize/token?grant_type=client_credentials",
-            {"omadacId": OMADAC_ID, "client_id": CLIENT_ID, "client_secret": CLIENT_SECRET},
+            {"client_id": CLIENT_ID, "client_secret": CLIENT_SECRET},
         ),
         (
             f"{NORTHBOUND_URL}/openapi/authorize/token?grant_type=client_credentials",
-            {"omadacId": OMADAC_ID, "clientId": CLIENT_ID, "clientSecret": CLIENT_SECRET},
+            {"clientId": CLIENT_ID, "clientSecret": CLIENT_SECRET},
         ),
         (
             f"{CONNECTOR_URL}/openapi/authorize/token?grant_type=client_credentials",
+            {"client_id": CLIENT_ID, "client_secret": CLIENT_SECRET},
+        ),
+        (
+            f"{CONNECTOR_URL}/openapi/authorize/token?grant_type=client_credentials",
+            {"clientId": CLIENT_ID, "clientSecret": CLIENT_SECRET},
+        ),
+        # Fallback: with omadacId (works on some self-hosted versions)
+        (
+            f"{NORTHBOUND_URL}/openapi/authorize/token?grant_type=client_credentials",
             {"omadacId": OMADAC_ID, "client_id": CLIENT_ID, "client_secret": CLIENT_SECRET},
         ),
         (
