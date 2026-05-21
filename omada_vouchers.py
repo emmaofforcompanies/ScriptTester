@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
 Omada Cloud OpenAPI - List In-Use Vouchers
-Supports: EU West (euw1) and other regional cloud controllers
-Auth:      OAuth2 Client Credentials mode (Client ID + Client Secret)
+Region: EU West  (euw1)
+Auth:   OAuth2 Client Credentials mode
 
 Usage:
     pip install requests
     python omada_vouchers.py
 
-    Or export env vars instead of editing the CONFIG block:
-        OMADA_CLIENT_ID, OMADA_CLIENT_SECRET, OMADA_OMADAC_ID,
-        OMADA_CONNECTOR_URL  (optional, defaults to EU West)
+    Debug mode (prints raw API responses):
+    python omada_vouchers.py --debug
 """
 
 import os
@@ -23,67 +22,106 @@ from datetime import datetime
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ──────────────────────────────────────────────────────────────
-#  CONFIG  –  edit here  OR  set environment variables
+#  CONFIG  –  fill these in
 # ──────────────────────────────────────────────────────────────
-
-# From your Omada Cloud URL:
-#   omadacId=3ee66939ba6b266f59d8e2ef60be1870
-OMADAC_ID = "3ee66939ba6b266f59d8e2ef60be1870"
 
 # From Settings > Platform Integration > Open API  (Client mode app)
 CLIENT_ID     = "01620a1fb27e4e9a9d3d5dd7f18faaa9"
 CLIENT_SECRET = "70be9cbe1cf74aa3b99195166d8c5e18"
 
-# Connector URL from your Omada Cloud login URL
-# (the connectorUrl= param you shared)
-CONNECTOR_URL = os.getenv(
-    "OMADA_CONNECTOR_URL",
-    "https://euw1-api-omada-controller-connector.tplinkcloud.com"
-)
+# From your Omada Cloud browser URL  (omadacId= param)
+OMADAC_ID = "3ee66939ba6b266f59d8e2ef60be1870"
 
-# Leave blank to auto-select the first/only site
+# EU West northbound (token + API calls go here for cloud)
+NORTHBOUND_URL = "https://euw1-omada-northbound.tplinkcloud.com"
+
+# Connector URL (from connectorUrl= param in your browser URL)
+CONNECTOR_URL  = "https://euw1-api-omada-controller-connector.tplinkcloud.com"
+
+# Leave blank to auto-select the first site
 SITE_ID = os.getenv("OMADA_SITE_ID", "")
 
-PAGE_SIZE = 100   # vouchers per page
+PAGE_SIZE = 100
+DEBUG     = "--debug" in sys.argv
 # ──────────────────────────────────────────────────────────────
 
 
+def dbg(label, data):
+    if DEBUG:
+        print(f"\n[DEBUG] {label}:")
+        print(json.dumps(data, indent=2) if isinstance(data, (dict, list)) else data)
+
+
 def get_access_token(session):
-    """OAuth2 client_credentials flow → returns access token string."""
-    url = f"{CONNECTOR_URL}/openapi/authorize/token?grant_type=client_credentials"
-    payload = {
-        "omadacId":     OMADAC_ID,
-        "client_id":    CLIENT_ID,
-        "client_secret": CLIENT_SECRET,
-    }
-    resp = session.post(url, json=payload)
-    resp.raise_for_status()
-    data = resp.json()
-    if data.get("errorCode", -1) != 0:
-        sys.exit(f"✗ Token request failed: {data.get('msg', data)}")
-    token = data["result"]["accessToken"]
-    expires_in = data["result"].get("expiresIn", "?")
-    print(f"  Access token obtained  (expires in {expires_in}s)")
-    return token
+    """
+    Try both URL patterns and both payload key styles used by
+    different Omada cloud versions.
+    """
+    attempts = [
+        # (url, payload)
+        (
+            f"{NORTHBOUND_URL}/openapi/authorize/token?grant_type=client_credentials",
+            {"omadacId": OMADAC_ID, "client_id": CLIENT_ID, "client_secret": CLIENT_SECRET},
+        ),
+        (
+            f"{NORTHBOUND_URL}/openapi/authorize/token?grant_type=client_credentials",
+            {"omadacId": OMADAC_ID, "clientId": CLIENT_ID, "clientSecret": CLIENT_SECRET},
+        ),
+        (
+            f"{CONNECTOR_URL}/openapi/authorize/token?grant_type=client_credentials",
+            {"omadacId": OMADAC_ID, "client_id": CLIENT_ID, "client_secret": CLIENT_SECRET},
+        ),
+        (
+            f"{CONNECTOR_URL}/openapi/authorize/token?grant_type=client_credentials",
+            {"omadacId": OMADAC_ID, "clientId": CLIENT_ID, "clientSecret": CLIENT_SECRET},
+        ),
+    ]
+
+    last_error = ""
+    for url, payload in attempts:
+        print(f"  Trying token endpoint: {url}")
+        dbg("token payload", payload)
+        try:
+            resp = session.post(url, json=payload, timeout=15)
+            dbg("token response", resp.json())
+            data = resp.json()
+            if data.get("errorCode", -1) == 0:
+                token = data["result"]["accessToken"]
+                expires = data["result"].get("expiresIn", "?")
+                print(f"  ✓ Token obtained  (expires in {expires}s)")
+                return token, url.split("/openapi/")[0]   # return (token, base_url)
+            last_error = data.get("msg", str(data))
+            print(f"    ✗ {last_error}")
+        except Exception as e:
+            print(f"    ✗ Request error: {e}")
+
+    sys.exit(
+        f"\n✗ Could not obtain access token.\n"
+        f"  Last error : {last_error}\n\n"
+        f"  Check:\n"
+        f"  1. CLIENT_ID and CLIENT_SECRET are correct (copy-paste from Platform Integration > Open API)\n"
+        f"  2. The API app is set to 'Client' mode (not Authorization Code mode)\n"
+        f"  3. OMADAC_ID matches what's shown in Platform Integration\n"
+        f"  4. Run with --debug to see full request/response details\n"
+    )
 
 
-def get_sites(session, token):
-    """Return list of sites available to this API client."""
-    url = f"{CONNECTOR_URL}/openapi/v1/{OMADAC_ID}/sites"
+def get_sites(session, base_url, token):
+    url     = f"{base_url}/openapi/v1/{OMADAC_ID}/sites"
     headers = {"Authorization": f"AccessToken={token}"}
     params  = {"currentPage": 1, "currentPageSize": 50}
-    resp = session.get(url, headers=headers, params=params)
-    resp.raise_for_status()
-    data = resp.json()
+    resp    = session.get(url, headers=headers, params=params, timeout=15)
+    data    = resp.json()
+    dbg("sites response", data)
     if data.get("errorCode", -1) != 0:
         sys.exit(f"✗ Could not fetch sites: {data.get('msg', data)}")
     return data.get("result", {}).get("data", [])
 
 
-def pick_site(session, token):
-    sites = get_sites(session, token)
+def pick_site(session, base_url, token):
+    sites = get_sites(session, base_url, token)
     if not sites:
-        sys.exit("✗ No sites found — check your API app's site permissions.")
+        sys.exit("✗ No sites found — check the API app's site permissions.")
     if len(sites) == 1:
         s = sites[0]
         print(f"  Auto-selected site : {s['name']}  ({s['id']})")
@@ -95,48 +133,43 @@ def pick_site(session, token):
     return sites[int(idx)]["id"]
 
 
-def fetch_vouchers(session, token, site_id, status="Used"):
-    """
-    Fetch all vouchers for the given site.
-    status: Used | Unused | Expired | All
-    'Used' = voucher has been redeemed (active/in-use).
-    """
+def fetch_vouchers(session, base_url, token, site_id, status="Used"):
     all_vouchers = []
-    page = 1
+    page    = 1
     headers = {"Authorization": f"AccessToken={token}"}
 
-    while True:
-        # Try OpenAPI v1 endpoint first (voucher-groups / vouchers)
-        url = (
-            f"{CONNECTOR_URL}/openapi/v1/{OMADAC_ID}"
-            f"/sites/{site_id}/hotspot/vouchers"
+    # Try /vouchers then /voucher-groups
+    endpoints = [
+        f"{base_url}/openapi/v1/{OMADAC_ID}/sites/{site_id}/hotspot/vouchers",
+        f"{base_url}/openapi/v1/{OMADAC_ID}/sites/{site_id}/hotspot/voucher-groups",
+    ]
+
+    working_url = None
+    for ep in endpoints:
+        params = {"currentPage": 1, "currentPageSize": 1, "status": status}
+        resp   = session.get(ep, headers=headers, params=params, timeout=15)
+        data   = resp.json()
+        dbg(f"probe {ep}", data)
+        if data.get("errorCode", -1) == 0:
+            working_url = ep
+            print(f"  Using endpoint: {ep}")
+            break
+
+    if not working_url:
+        sys.exit(
+            "✗ Voucher endpoint not found.\n"
+            "  The voucher API may not be available on your controller version.\n"
+            "  Try running with --debug to see the full error response."
         )
-        params = {
-            "currentPage":     page,
-            "currentPageSize": PAGE_SIZE,
-            "status":          status,
-        }
-        resp = session.get(url, headers=headers, params=params)
-        resp.raise_for_status()
+
+    while True:
+        params = {"currentPage": page, "currentPageSize": PAGE_SIZE, "status": status}
+        resp   = session.get(working_url, headers=headers, params=params, timeout=15)
         result = resp.json()
-
-        if result.get("errorCode", -1) != 0:
-            # Some controller versions expose voucher-groups instead
-            print(f"  Note: /vouchers returned error ({result.get('msg')}), trying /voucher-groups …")
-            url2 = (
-                f"{CONNECTOR_URL}/openapi/v1/{OMADAC_ID}"
-                f"/sites/{site_id}/hotspot/voucher-groups"
-            )
-            resp2 = session.get(url2, headers=headers, params=params)
-            resp2.raise_for_status()
-            result = resp2.json()
-            if result.get("errorCode", -1) != 0:
-                sys.exit(f"✗ Could not fetch vouchers: {result.get('msg', result)}")
-
-        data  = result.get("result", {}).get("data", [])
-        total = result.get("result", {}).get("totalRows", len(all_vouchers))
+        dbg(f"page {page}", result)
+        data   = result.get("result", {}).get("data", [])
+        total  = result.get("result", {}).get("totalRows", len(all_vouchers))
         all_vouchers.extend(data)
-
         if len(all_vouchers) >= total or not data:
             break
         page += 1
@@ -144,9 +177,9 @@ def fetch_vouchers(session, token, site_id, status="Used"):
     return all_vouchers
 
 
-# ── Formatting helpers ─────────────────────────────────────────
+# ── Formatting ─────────────────────────────────────────────────
 
-def format_duration(seconds):
+def fmt_duration(seconds):
     if seconds is None:
         return "—"
     h, rem = divmod(int(seconds), 3600)
@@ -154,7 +187,7 @@ def format_duration(seconds):
     return f"{h}h {m}m"
 
 
-def format_ts(ms):
+def fmt_ts(ms):
     if not ms:
         return "—"
     try:
@@ -165,84 +198,47 @@ def format_ts(ms):
 
 def print_vouchers(vouchers):
     if not vouchers:
-        print("\n  (no vouchers found with status=Used)\n")
+        print("\n  (no in-use vouchers found)\n")
         return
 
-    COL = {
-        "code":     14,
-        "name":     20,
-        "client":   18,
-        "duration": 12,
-        "created":  17,
-        "expires":  17,
-        "traffic":  14,
-        "status":    8,
-    }
+    W = {"code": 14, "name": 20, "mac": 18, "dur": 12, "created": 17, "expires": 17, "traffic": 13, "status": 8}
+    hdr = (f"{'Code':<{W['code']}}{'Name':<{W['name']}}{'Client MAC':<{W['mac']}}"
+           f"{'Duration':<{W['dur']}}{'Created':<{W['created']}}{'Expires':<{W['expires']}}"
+           f"{'Traffic(MB)':<{W['traffic']}}{'Status':<{W['status']}}")
+    sep = "─" * len(hdr)
 
-    header = (
-        f"{'Code':<{COL['code']}}"
-        f"{'Name':<{COL['name']}}"
-        f"{'Client MAC':<{COL['client']}}"
-        f"{'Duration':<{COL['duration']}}"
-        f"{'Created':<{COL['created']}}"
-        f"{'Expires':<{COL['expires']}}"
-        f"{'Traffic (MB)':<{COL['traffic']}}"
-        f"{'Status':<{COL['status']}}"
-    )
-    sep = "─" * len(header)
-
-    print(f"\n{sep}")
-    print(header)
-    print(sep)
-
+    print(f"\n{sep}\n{hdr}\n{sep}")
     for v in vouchers:
-        code     = v.get("code", "—")
-        name     = (v.get("name") or "—")[:COL["name"] - 1]
-        client   = v.get("clientMac") or v.get("bindMac") or "—"
-        duration = format_duration(v.get("duration"))
-        created  = format_ts(v.get("createTime"))
-        expires  = format_ts(v.get("expireTime") or v.get("endTime"))
-        traffic  = v.get("trafficLimit", "∞")
-        status   = v.get("status", "—")
-
         print(
-            f"{code:<{COL['code']}}"
-            f"{name:<{COL['name']}}"
-            f"{client:<{COL['client']}}"
-            f"{duration:<{COL['duration']}}"
-            f"{created:<{COL['created']}}"
-            f"{expires:<{COL['expires']}}"
-            f"{str(traffic):<{COL['traffic']}}"
-            f"{str(status):<{COL['status']}}"
+            f"{v.get('code','—'):<{W['code']}}"
+            f"{(v.get('name') or '—')[:W['name']-1]:<{W['name']}}"
+            f"{(v.get('clientMac') or v.get('bindMac') or '—'):<{W['mac']}}"
+            f"{fmt_duration(v.get('duration')):<{W['dur']}}"
+            f"{fmt_ts(v.get('createTime')):<{W['created']}}"
+            f"{fmt_ts(v.get('expireTime') or v.get('endTime')):<{W['expires']}}"
+            f"{str(v.get('trafficLimit','∞')):<{W['traffic']}}"
+            f"{str(v.get('status','—')):<{W['status']}}"
         )
-
     print(sep)
     print(f"  Total: {len(vouchers)} in-use voucher(s)\n")
 
 
 def main():
     if "YOUR_CLIENT_ID_HERE" in CLIENT_ID:
-        sys.exit(
-            "✗  Please set CLIENT_ID and CLIENT_SECRET in the CONFIG block\n"
-            "   (or via env vars OMADA_CLIENT_ID / OMADA_CLIENT_SECRET)"
-        )
+        sys.exit("✗  Set CLIENT_ID and CLIENT_SECRET in the CONFIG block (or env vars)")
 
     session = requests.Session()
     session.headers.update({"Content-Type": "application/json"})
 
-    print(f"\nConnecting to {CONNECTOR_URL}")
-    print(f"  omadacId : {OMADAC_ID}")
+    print(f"\nomadacId  : {OMADAC_ID}")
+    print(f"Northbound: {NORTHBOUND_URL}")
 
-    token   = get_access_token(session)
-    site_id = SITE_ID or pick_site(session, token)
+    token, base_url = get_access_token(session)
+    site_id = SITE_ID or pick_site(session, base_url, token)
 
-    print(f"\nFetching in-use vouchers for site {site_id} …")
-    vouchers = fetch_vouchers(session, token, site_id, status="Used")
-
+    print(f"\nFetching in-use vouchers …")
+    vouchers = fetch_vouchers(session, base_url, token, site_id, status="Used")
     print_vouchers(vouchers)
-
-    if "--json" in sys.argv:
-        print(json.dumps(vouchers, indent=2))
 
 
 if __name__ == "__main__":
